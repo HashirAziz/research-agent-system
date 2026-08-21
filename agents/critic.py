@@ -2,10 +2,6 @@
 agents/critic.py
 ────────────────
 Critic agent — quality gate that can trigger re-research loops.
-
-The critic scores the complete research package and decides:
-- APPROVED → proceed to Report Writer
-- REJECTED → send back to Researcher with specific improvement instructions
 """
 
 from __future__ import annotations
@@ -24,25 +20,21 @@ logger = get_logger(__name__)
 def get_llm() -> ChatOpenAI:
     return ChatOpenAI(
         model=settings.openai_model,
-        temperature=0.1,  # Very low for consistent, deterministic quality judgments
+        temperature=0.1,
         api_key=settings.openai_api_key,
         max_tokens=settings.max_tokens_per_agent,
     )
 
 
 def critic_node(state: ResearchState) -> dict:
-    """LangGraph node: Evaluate research quality and decide on loop."""
     loop_num = state.critique_loop_count + 1
-    logger.info(
-        f"[agent.critic]⚖️  Critic Agent starting (evaluation #{loop_num})..."
-    )
+    logger.info(f"[agent.critic]⚖️  Critic Agent starting (evaluation #{loop_num})...")
 
     research = state.research_output
     fact_check = state.fact_check_output
     summary = state.summarizer_output
     analysis = state.analyst_output
 
-    # Build evaluation context
     source_count = len(state.all_sources)
     web_findings_count = len(research.get("web_findings", [])) if research else 0
     rag_findings_count = len(research.get("rag_findings", [])) if research else 0
@@ -68,7 +60,7 @@ LOOP NUMBER: {loop_num} (max: {settings.max_critique_loops})
 === FACT-CHECK ISSUES ===
 {chr(10).join(f'• {i}' for i in flagged_issues) or 'None flagged'}
 
-=== KEY FINDINGS (summary) ===
+=== KEY FINDINGS ===
 {chr(10).join(f'• {p}' for p in key_points[:10]) or 'No key points extracted'}
 
 === REASONING CHAINS ===
@@ -83,10 +75,9 @@ LOOP NUMBER: {loop_num} (max: {settings.max_critique_loops})
 === PRIOR CRITIQUE HISTORY ===
 {prior_critiques}
 
-Score this research package rigorously. Be specific in your feedback.
-Apply the approval threshold: quality_score ≥ {settings.min_quality_score}"""
+Score this research package. Approval threshold: quality_score >= {settings.min_quality_score}"""
 
-    llm = get_llm().with_structured_output(CriticOutput)
+    llm = get_llm().with_structured_output(CriticOutput, method="function_calling")
 
     try:
         critique: CriticOutput = llm.invoke([
@@ -95,7 +86,6 @@ Apply the approval threshold: quality_score ≥ {settings.min_quality_score}"""
         ])
     except Exception as e:
         logger.error(f"Critic LLM call failed: {e}")
-        # Default to approved on error to avoid infinite loops
         critique = CriticOutput(
             quality_score=7.5,
             coverage_score=7.0,
@@ -108,14 +98,10 @@ Apply the approval threshold: quality_score ≥ {settings.min_quality_score}"""
             weaknesses=[f"Critic error: {str(e)}"],
         )
 
-    # Force approval if we've hit max loops
     if loop_num >= settings.max_critique_loops:
-        logger.warning(
-            f"   → Max critique loops ({settings.max_critique_loops}) reached — forcing approval"
-        )
+        logger.warning(f"   → Max loops ({settings.max_critique_loops}) reached — forcing approval")
         critique.approved = True
 
-    # Build critique log entry
     log_entry = (
         f"Loop {loop_num}: Score={critique.quality_score:.1f} | "
         f"Approved={critique.approved} | "

@@ -1,7 +1,7 @@
 """
 agents/summarizer.py
 ────────────────────
-Summarizer agent — distills research + fact-check into structured summary.
+Summarizer agent — distills research into structured summary.
 """
 
 from __future__ import annotations
@@ -28,7 +28,6 @@ def get_llm() -> ChatOpenAI:
 
 
 def summarizer_node(state: ResearchState) -> dict:
-    """LangGraph node: Summarize research findings."""
     logger.info("[agent.summarizer]📋 Summarizer Agent starting...")
 
     research = state.research_output
@@ -42,7 +41,6 @@ def summarizer_node(state: ResearchState) -> dict:
             "agent_status": {**state.agent_status, "summarizer": "skipped"},
         }
 
-    # Combine context
     web_findings = research.get("web_findings", [])
     rag_findings = research.get("rag_findings", [])
     combined = combine_findings(web_findings, rag_findings)
@@ -63,10 +61,9 @@ def summarizer_node(state: ResearchState) -> dict:
 
 Research gaps identified: {', '.join(research.get('research_gaps', ['None identified']))}
 
-Please provide a comprehensive, structured summary of all findings.
-Highlight the most important insights for decision-makers."""
+Please provide a comprehensive, structured summary of all findings."""
 
-    llm = get_llm().with_structured_output(SummarizerOutput)
+    llm = get_llm().with_structured_output(SummarizerOutput, method="function_calling")
 
     try:
         summary: SummarizerOutput = llm.invoke([
@@ -78,18 +75,22 @@ Highlight the most important insights for decision-makers."""
             f"{len(summary.themes)} themes | "
             f"{len(summary.contradictions)} contradictions"
         )
+        return {
+            "summarizer_output": summary.model_dump(),
+            "current_agent": "summarizer",
+            "agent_status": {**state.agent_status, "summarizer": "done"},
+        }
     except Exception as e:
         logger.error(f"Summarizer LLM call failed: {e}")
-        summary = SummarizerOutput(
-            executive_summary=f"Research on '{state.query}' completed with {len(web_findings)} web findings.",
+        fallback = SummarizerOutput(
+            executive_summary=f"Research on '{state.query}' completed.",
             key_points=web_findings[:7],
             themes=[],
             contradictions=[],
             data_points=[],
         )
-
-    return {
-        "summarizer_output": summary.model_dump(),
-        "current_agent": "summarizer",
-        "agent_status": {**state.agent_status, "summarizer": "done"},
-    }
+        return {
+            "summarizer_output": fallback.model_dump(),
+            "current_agent": "summarizer",
+            "agent_status": {**state.agent_status, "summarizer": "done"},
+        }

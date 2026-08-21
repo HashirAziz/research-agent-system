@@ -21,7 +21,7 @@ logger = get_logger(__name__)
 def get_llm() -> ChatOpenAI:
     return ChatOpenAI(
         model=settings.openai_model,
-        temperature=0.1,  # Low temp for fact-checking reliability
+        temperature=0.1,
         api_key=settings.openai_api_key,
         max_tokens=settings.max_tokens_per_agent,
     )
@@ -40,7 +40,6 @@ def fact_checker_node(state: ResearchState) -> dict:
             "agent_status": {**state.agent_status, "fact_checker": "skipped"},
         }
 
-    # Build context from research output
     web_findings = "\n".join(f"- {f}" for f in research.get("web_findings", []))
     rag_findings = "\n".join(f"- {f}" for f in research.get("rag_findings", []))
     raw_content = research.get("raw_content", "")
@@ -64,31 +63,33 @@ SOURCES CONSULTED:
 Please systematically verify all significant factual claims in these findings.
 Pay particular attention to statistics, dates, attributions, and causal claims."""
 
-    llm = get_llm().with_structured_output(FactCheckOutput)
+    llm = get_llm().with_structured_output(FactCheckOutput, method="function_calling")
 
     try:
         fact_check: FactCheckOutput = llm.invoke([
             SystemMessage(content=FACT_CHECKER_SYSTEM_PROMPT),
             HumanMessage(content=fact_check_prompt),
         ])
-
         logger.info(
             f"   → {len(fact_check.checks)} claims checked | "
             f"Reliability: {fact_check.overall_reliability:.2f} | "
             f"Issues: {len(fact_check.flagged_issues)}"
         )
+        return {
+            "fact_check_output": fact_check.model_dump(),
+            "current_agent": "fact_checker",
+            "agent_status": {**state.agent_status, "fact_checker": "done"},
+        }
     except Exception as e:
         logger.error(f"Fact-checker LLM call failed: {e}")
-        from schemas.outputs import FactCheckOutput, FactCheckItem
-        fact_check = FactCheckOutput(
+        fallback = FactCheckOutput(
             checks=[],
             overall_reliability=0.5,
             flagged_issues=[f"Fact-checking failed: {str(e)}"],
             verified_facts=[],
         )
-
-    return {
-        "fact_check_output": fact_check.model_dump(),
-        "current_agent": "fact_checker",
-        "agent_status": {**state.agent_status, "fact_checker": "done"},
-    }
+        return {
+            "fact_check_output": fallback.model_dump(),
+            "current_agent": "fact_checker",
+            "agent_status": {**state.agent_status, "fact_checker": "done"},
+        }

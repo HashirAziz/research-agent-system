@@ -1,7 +1,7 @@
 """
 agents/analyst.py
 ─────────────────
-Analyst / Synthesizer agent — multi-hop reasoning and causal analysis.
+Analyst agent — multi-hop reasoning and causal analysis.
 """
 
 from __future__ import annotations
@@ -20,14 +20,13 @@ logger = get_logger(__name__)
 def get_llm() -> ChatOpenAI:
     return ChatOpenAI(
         model=settings.openai_model,
-        temperature=0.4,  # Slightly higher for creative analysis
+        temperature=0.4,
         api_key=settings.openai_api_key,
         max_tokens=settings.max_tokens_per_agent,
     )
 
 
 def analyst_node(state: ResearchState) -> dict:
-    """LangGraph node: Deep multi-hop analysis and synthesis."""
     logger.info("[agent.analyst]🧠 Analyst Agent starting...")
 
     research = state.research_output
@@ -42,13 +41,12 @@ def analyst_node(state: ResearchState) -> dict:
             "agent_status": {**state.agent_status, "analyst": "skipped"},
         }
 
-    # Build rich context for analysis
     key_points = "\n".join(f"• {p}" for p in summary.get("key_points", []))
     themes = ", ".join(summary.get("themes", []))
     contradictions = "\n".join(f"⚡ {c}" for c in summary.get("contradictions", []))
     data_points = "\n".join(f"📊 {d}" for d in summary.get("data_points", []))
     research_gaps = "\n".join(f"❓ {g}" for g in research.get("research_gaps", []))
-    
+
     reliability = ""
     if fact_check:
         reliability = f"\nOverall source reliability: {fact_check.get('overall_reliability', 'N/A')}"
@@ -73,11 +71,10 @@ RESEARCH GAPS:
 {research_gaps}
 {reliability}
 
-Perform deep multi-hop reasoning analysis. Build explicit reasoning chains connecting these facts.
-Identify root causes, map implications across time horizons, and provide actionable recommendations.
-Challenge assumptions. Find non-obvious connections."""
+Perform deep multi-hop reasoning analysis. Build explicit reasoning chains.
+Identify root causes, map implications, and provide actionable recommendations."""
 
-    llm = get_llm().with_structured_output(AnalystOutput)
+    llm = get_llm().with_structured_output(AnalystOutput, method="function_calling")
 
     try:
         analysis: AnalystOutput = llm.invoke([
@@ -89,9 +86,14 @@ Challenge assumptions. Find non-obvious connections."""
             f"{len(analysis.implications)} implications | "
             f"{len(analysis.recommendations)} recommendations"
         )
+        return {
+            "analyst_output": analysis.model_dump(),
+            "current_agent": "analyst",
+            "agent_status": {**state.agent_status, "analyst": "done"},
+        }
     except Exception as e:
         logger.error(f"Analyst LLM call failed: {e}")
-        analysis = AnalystOutput(
+        fallback = AnalystOutput(
             multi_hop_chains=[],
             root_causes=[],
             implications=[],
@@ -99,9 +101,8 @@ Challenge assumptions. Find non-obvious connections."""
             confidence_assessment="Analysis failed due to technical error.",
             recommendations=[],
         )
-
-    return {
-        "analyst_output": analysis.model_dump(),
-        "current_agent": "analyst",
-        "agent_status": {**state.agent_status, "analyst": "done"},
-    }
+        return {
+            "analyst_output": fallback.model_dump(),
+            "current_agent": "analyst",
+            "agent_status": {**state.agent_status, "analyst": "done"},
+        }

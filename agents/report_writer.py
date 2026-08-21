@@ -30,7 +30,6 @@ def get_llm() -> ChatOpenAI:
 
 
 def save_report(markdown: str, query: str) -> str:
-    """Save report to disk and return file path."""
     os.makedirs(settings.reports_dir, exist_ok=True)
     report_id = generate_report_id(query)
     filename = f"{sanitize_filename(query[:40])}_{report_id}.md"
@@ -42,7 +41,6 @@ def save_report(markdown: str, query: str) -> str:
 
 
 def report_writer_node(state: ResearchState) -> dict:
-    """LangGraph node: Write the final structured research report."""
     logger.info("[agent.writer]✍️  Report Writer Agent starting...")
 
     research = state.research_output
@@ -51,30 +49,23 @@ def report_writer_node(state: ResearchState) -> dict:
     analysis = state.analyst_output
     critique = state.critic_output
 
-    # Build bibliography from all collected sources
     bibliography = build_bibliography(state.all_sources)
 
-    # Compile source list for citation reference
     source_list = "\n".join(
         f"[Source {i+1}] {s.title} — {s.url or 'Private Document'}"
         for i, s in enumerate(state.all_sources[:20])
     )
 
-    # Build comprehensive context for the report writer
     key_points = "\n".join(f"• {p}" for p in (summary or {}).get("key_points", []))
     implications = "\n".join(f"• {i}" for i in (analysis or {}).get("implications", []))
     recommendations = "\n".join(f"• {r}" for r in (analysis or {}).get("recommendations", []))
     root_causes = "\n".join(f"• {r}" for r in (analysis or {}).get("root_causes", []))
     verified_facts = "\n".join(f"✓ {f}" for f in (fact_check or {}).get("verified_facts", []))
 
-    quality_metadata = {}
-    if critique:
-        quality_metadata = {
-            "quality_score": critique.get("quality_score"),
-            "coverage_score": critique.get("coverage_score"),
-            "accuracy_score": critique.get("accuracy_score"),
-            "depth_score": critique.get("depth_score"),
-        }
+    q_score = float((critique or {}).get("quality_score", 0.0))
+    c_score = float((critique or {}).get("coverage_score", 0.0))
+    a_score = float((critique or {}).get("accuracy_score", 0.0))
+    d_score = float((critique or {}).get("depth_score", 0.0))
 
     report_prompt = f"""Research Query: {state.query}
 
@@ -87,32 +78,27 @@ def report_writer_node(state: ResearchState) -> dict:
 === VERIFIED FACTS ===
 {verified_facts or 'Fact-checking not available'}
 
-=== ANALYTICAL INSIGHTS ===
-Root Causes:
+=== ROOT CAUSES ===
 {root_causes or 'Not analyzed'}
 
-Implications:
+=== IMPLICATIONS ===
 {implications or 'Not analyzed'}
 
-Recommendations:
+=== RECOMMENDATIONS ===
 {recommendations or 'Not available'}
 
-=== SOURCES AVAILABLE FOR CITATION ===
+=== SOURCES FOR CITATION ===
 {source_list}
 
 === QUALITY SCORES ===
-Quality: {quality_metadata.get('quality_score', 'N/A')}/10
-Coverage: {quality_metadata.get('coverage_score', 'N/A')}/10
-Accuracy: {quality_metadata.get('accuracy_score', 'N/A')}/10
-Depth: {quality_metadata.get('depth_score', 'N/A')}/10
+Quality: {q_score}/10 | Coverage: {c_score}/10 | Accuracy: {a_score}/10 | Depth: {d_score}/10
 
-CRITIQUE LOOPS: {state.critique_loop_count}
 DATE: {datetime.now().strftime('%B %d, %Y')}
 
-Write a comprehensive, professional research report. Use [Source N] citations throughout.
+Write a comprehensive professional research report using [Source N] citations throughout.
 The full_markdown field must contain the COMPLETE formatted Markdown report."""
 
-    llm = get_llm().with_structured_output(ReportOutput)
+    llm = get_llm().with_structured_output(ReportOutput, method="function_calling")
 
     try:
         report: ReportOutput = llm.invoke([
@@ -120,47 +106,57 @@ The full_markdown field must contain the COMPLETE formatted Markdown report."""
             HumanMessage(content=report_prompt),
         ])
 
-        # Ensure bibliography is appended to full_markdown
         if bibliography not in report.full_markdown:
             report.full_markdown += f"\n\n---\n\n{bibliography}"
 
-        # Add quality badge to report
-        quality_badge = f"\n\n---\n*Quality Score: {quality_metadata.get('quality_score', 'N/A')}/10 | Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')} | Sources: {len(state.all_sources)}*"
+        quality_badge = (
+            f"\n\n---\n*Quality Score: {q_score}/10 | "
+            f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')} | "
+            f"Sources: {len(state.all_sources)}*"
+        )
         report.full_markdown += quality_badge
 
         logger.info(
-            f"   → Report written: '{report.title}' | "
+            f"   → Report: '{report.title}' | "
             f"~{report.word_count} words | "
             f"{len(report.sections)} sections"
         )
+        save_report(report.full_markdown, state.query)
 
-        # Save to disk
-        report_path = save_report(report.full_markdown, state.query)
+        return {
+            "report_output": report.model_dump(),
+            "final_report_markdown": report.full_markdown,
+            "current_agent": "report_writer",
+            "agent_status": {**state.agent_status, "report_writer": "done"},
+        }
 
     except Exception as e:
         logger.error(f"Report Writer LLM call failed: {e}")
-        # Fallback minimal report
         fallback_md = f"# Research Report: {state.query}\n\n"
         fallback_md += f"*Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}*\n\n"
         fallback_md += f"## Executive Summary\n{(summary or {}).get('executive_summary', 'N/A')}\n\n"
         fallback_md += f"## Key Findings\n{key_points}\n\n"
         fallback_md += f"\n\n---\n\n{bibliography}"
 
-        report = ReportOutput(
+        save_report(fallback_md, state.query)
+
+        fallback_report = ReportOutput(
             title=f"Research Report: {state.query}",
             abstract=(summary or {}).get("executive_summary", ""),
             sections=[ReportSection(title="Findings", content=key_points, citations=[])],
             conclusion="Report generation encountered errors.",
             bibliography=[bibliography],
-            quality_metadata=quality_metadata,
+            quality_score=q_score,
+            coverage_score=c_score,
+            accuracy_score=a_score,
+            depth_score=d_score,
             word_count=len(fallback_md.split()),
             full_markdown=fallback_md,
         )
-        save_report(fallback_md, state.query)
 
-    return {
-        "report_output": report.model_dump(),
-        "final_report_markdown": report.full_markdown,
-        "current_agent": "report_writer",
-        "agent_status": {**state.agent_status, "report_writer": "done"},
-    }
+        return {
+            "report_output": fallback_report.model_dump(),
+            "final_report_markdown": fallback_md,
+            "current_agent": "report_writer",
+            "agent_status": {**state.agent_status, "report_writer": "done"},
+        }
